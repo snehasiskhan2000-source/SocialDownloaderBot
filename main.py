@@ -2,7 +2,6 @@ import os
 import requests
 import aiohttp
 import asyncio
-import signal
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from keep_alive import keep_alive
@@ -12,7 +11,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY") 
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# RAM Cache
+# RAM Cache for <1s delivery
 cache_memory = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -37,60 +36,71 @@ async def download_file(url, filename):
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     
-    # 1. Cache Check
+    # 1. Instant Cache Check
     if url in cache_memory:
         data = cache_memory[url]
         kb = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
         await update.message.reply_video(video=data['id'], caption=data['cap'], reply_markup=InlineKeyboardMarkup(kb), supports_streaming=True)
         return
 
-    status = await update.message.reply_text("🔎 **Fetching Media...**")
+    status = await update.message.reply_text("🔎 **Searching for video...**")
 
-    # 2. Match HTML API Logic (Exact headers from your source)
-    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink"
+    # 2. Universal API Request
+    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autodownload"
     headers = {
-        "Content-Type": "application/json",
-        "X-RapidAPI-Host": "social-download-all-in-one.p.rapidapi.com",
-        "X-RapidAPI-Key": RAPID_API_KEY
+        "X-RapidAPI-Key": RAPID_API_KEY,
+        "X-RapidAPI-Host": "social-download-all-in-one.p.rapidapi.com"
     }
     
     try:
         response = requests.post(api_url, json={"url": url}, headers=headers, timeout=30)
         res = response.json()
 
-        if res.get("error"):
-            return await status.edit_text(f"❌ Error: {res.get('message')}")
+        # Robust Media Extraction
+        media_url = None
+        # Check standard fields
+        if res.get('url'): media_url = res['url']
+        # Check list of links (common for YouTube/Instagram)
+        elif res.get('links') and len(res['links']) > 0:
+            media_url = res['links'][0].get('url')
+        # Check 'medias' array (from your HTML sample)
+        elif res.get('medias') and len(res['medias']) > 0:
+            media_url = res['medias'][0].get('url')
 
-        medias = res.get('medias', [])
-        if not medias:
-            return await status.edit_text("❌ No download options available.")
+        if not media_url:
+            return await status.edit_text("❌ **Link Not Supported.**\nPlease ensure the post is public.")
 
-        # Grab first media link
-        media_url = medias[0].get('url')
-        await status.edit_text("📥 **Streaming to Telegram...**")
-        
+        await status.edit_text("📥 **Uploading to Telegram...**")
         filename = f"vid_{update.effective_user.id}.mp4"
         
         if await download_file(media_url, filename):
-            caption = f"🎬 **{res.get('title', 'Video')[:50]}**\n\n🕒 **Auto-deleting in 20 min.**"
+            title = res.get('title', 'Social Media Video')
+            caption = f"🎬 **{title[:50]}**\n\n🕒 **Auto-deleting in 20 min.**"
             kb = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
             
             with open(filename, 'rb') as f:
-                # Log to Archive
+                # Log to Archive for caching
                 log = await context.bot.send_video(chat_id=CHANNEL_ID, video=f)
                 file_id = log.video.file_id
                 cache_memory[url] = {'id': file_id, 'cap': caption}
                 
                 f.seek(0)
-                sent = await update.message.reply_video(video=f, caption=caption, reply_markup=InlineKeyboardMarkup(kb), supports_streaming=True)
+                sent = await update.message.reply_video(
+                    video=f, 
+                    caption=caption, 
+                    reply_markup=InlineKeyboardMarkup(kb), 
+                    supports_streaming=True
+                )
 
             if os.path.exists(filename): os.remove(filename)
             await status.delete()
             asyncio.create_task(delete_msg(context, update.effective_chat.id, sent.message_id))
         else:
-            await status.edit_text("❌ Download failed.")
+            await status.edit_text("❌ **Download Failed.** (The video file was too large or unreachable)")
+
     except Exception as e:
-        await status.edit_text(f"❌ API Error. Check your subscription.")
+        print(f"API Error: {e}")
+        await status.edit_text(f"❌ **API Error.** Please check your RapidAPI subscription.")
 
 async def delete_msg(context, chat_id, msg_id):
     await asyncio.sleep(1200)
@@ -106,13 +116,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     keep_alive()
     app = Application.builder().token(TOKEN).build()
-    
-    # Add Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_link))
     
-    print("Bot is starting...")
+    # Conflict fix: Clear old updates before starting
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
