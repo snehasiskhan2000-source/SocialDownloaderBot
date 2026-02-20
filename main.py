@@ -6,9 +6,9 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from keep_alive import keep_alive
 
-# Config
+# Config (Ensure these are set in Render Environment Variables)
 TOKEN = os.getenv("BOT_TOKEN")
-RAPID_API_KEY = os.getenv("RAPID_API_KEY")
+RAPID_API_KEY = os.getenv("RAPID_API_KEY") 
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
 # RAM Cache for <1s delivery
@@ -43,39 +43,43 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_video(video=data['id'], caption=data['cap'], reply_markup=InlineKeyboardMarkup(kb), supports_streaming=True)
         return
 
-    status = await update.message.reply_text("🔎 **Processing Link...**")
+    status = await update.message.reply_text("🔎 **Fetching Media Information...**")
 
-    # 2. RapidAPI Fetch (Using robust /v1/social/dl endpoint)
-    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/dl"
+    # 2. Match HTML API Logic
+    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autolink"
     headers = {
-        "x-rapidapi-key": RAPID_API_KEY,
-        "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "X-RapidAPI-Host": "social-download-all-in-one.p.rapidapi.com",
+        "X-RapidAPI-Key": RAPID_API_KEY
     }
     
     try:
-        # Note: Added print to Render logs for debugging
         response = requests.post(api_url, json={"url": url}, headers=headers, timeout=30)
         res = response.json()
-        print(f"API Response: {res}") # This helps us see errors in Render logs
 
-        # Improved media URL extraction
-        media_url = None
-        if res.get('status') == 'success' and res.get('medias'):
-            # Grab the highest quality link available
-            media_url = res['medias'][0].get('url')
-        elif res.get('url'):
-            media_url = res.get('url')
+        # Check for errors in response
+        if res.get("error"):
+            return await status.edit_text(f"❌ API Error: {res.get('message', 'Failed to fetch video')}")
 
-        if not media_url:
-            return await status.edit_text("❌ **Media not found.**\nThis link might be private or expired.")
+        # Media logic based on the HTML structure
+        medias = res.get('medias', [])
+        if not medias:
+            return await status.edit_text("❌ No download options found for this link.")
 
+        # Get the first available media (usually highest quality)
+        best_media = medias[0]
+        media_url = best_media.get('url')
+        
         await status.edit_text("📥 **Streaming to Telegram...**")
-        filename = f"vid_{update.effective_user.id}.mp4"
+        
+        # Determine file extension
+        ext = best_media.get('extension', 'mp4').lower()
+        filename = f"file_{update.effective_user.id}.{ext}"
         
         if await download_file(media_url, filename):
-            title = res.get('title', 'Social Media Video')
-            caption = f"🎬 **{title[:50]}**\n\n🕒 **Auto-deleting in 20 min.**"
+            title = res.get('title', 'Social Video')
+            author = res.get('author', 'Unknown')
+            caption = f"🎬 **{title[:50]}**\n👤 By: {author}\n\n🕒 **Auto-deleting in 20 min.**"
             kb = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
             
             with open(filename, 'rb') as f:
@@ -86,7 +90,6 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Cache it
                 cache_memory[url] = {'id': file_id, 'cap': caption}
                 
-                # Send to user
                 f.seek(0)
                 sent = await update.message.reply_video(
                     video=f, 
@@ -100,9 +103,9 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             asyncio.create_task(delete_msg(context, update.effective_chat.id, sent.message_id))
         else:
             await status.edit_text("❌ Download failed.")
+
     except Exception as e:
-        print(f"Handle error: {e}")
-        await status.edit_text(f"❌ **API Connection Error.**\nPlease check your RapidAPI subscription.")
+        await status.edit_text(f"❌ System Error: `{str(e)}`")
 
 async def delete_msg(context, chat_id, msg_id):
     await asyncio.sleep(1200)
@@ -125,4 +128,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
