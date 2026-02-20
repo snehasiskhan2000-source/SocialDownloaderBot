@@ -45,32 +45,36 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status = await update.message.reply_text("🔎 **Processing Link...**")
 
-    # 2. RapidAPI Fetch (Using the 'autodownload' endpoint)
-    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autodownload"
+    # 2. RapidAPI Fetch (Using robust /v1/social/dl endpoint)
+    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/dl"
     headers = {
         "x-rapidapi-key": RAPID_API_KEY,
-        "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com"
+        "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com",
+        "Content-Type": "application/json"
     }
     
     try:
+        # Note: Added print to Render logs for debugging
         response = requests.post(api_url, json={"url": url}, headers=headers, timeout=30)
         res = response.json()
-        
-        # Smart detection of media URL
+        print(f"API Response: {res}") # This helps us see errors in Render logs
+
+        # Improved media URL extraction
         media_url = None
-        # Check standard paths
-        if res.get('url'): media_url = res['url']
-        elif res.get('medias'): media_url = res['medias'][0].get('url')
-        elif res.get('links'): media_url = res['links'][0].get('url')
+        if res.get('status') == 'success' and res.get('medias'):
+            # Grab the highest quality link available
+            media_url = res['medias'][0].get('url')
+        elif res.get('url'):
+            media_url = res.get('url')
 
         if not media_url:
-            return await status.edit_text("❌ **Link Not Supported.**\nMake sure the video is public.")
+            return await status.edit_text("❌ **Media not found.**\nThis link might be private or expired.")
 
         await status.edit_text("📥 **Streaming to Telegram...**")
         filename = f"vid_{update.effective_user.id}.mp4"
         
         if await download_file(media_url, filename):
-            title = res.get('title', 'Social Video')
+            title = res.get('title', 'Social Media Video')
             caption = f"🎬 **{title[:50]}**\n\n🕒 **Auto-deleting in 20 min.**"
             kb = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
             
@@ -97,7 +101,8 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await status.edit_text("❌ Download failed.")
     except Exception as e:
-        await status.edit_text(f"❌ API Error. Check if your API Key is valid.")
+        print(f"Handle error: {e}")
+        await status.edit_text(f"❌ **API Connection Error.**\nPlease check your RapidAPI subscription.")
 
 async def delete_msg(context, chat_id, msg_id):
     await asyncio.sleep(1200)
@@ -120,4 +125,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
