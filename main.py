@@ -8,17 +8,15 @@ from keep_alive import keep_alive
 
 # Configuration
 TOKEN = os.getenv("BOT_TOKEN")
-API_KEY = os.getenv("XAPIVERSE_KEY")
+RAPID_API_KEY = os.getenv("RAPID_API_KEY") # Get from RapidAPI Dashboard
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# RAM Cache for <1s delivery on repeated links
+# RAM Cache for Instant Re-delivery
 cache_memory = {}
 
-TERABOX_DOMAINS = ["terabox.com", "nephobox.com", "4shared.com", "mirrobox.com", "momerybox.com", "teraboxapp.com", "1024tera.com", "terasharelink.com"]
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Clean welcome message without any buttons
-    text = "✨ **TeraBox Video Downloader** ✨\n\nSend A Terabox Video Link To Download😎"
+    # Clean welcome message - no buttons attached here as requested
+    text = "✨ **Social Media Downloader** ✨\n\nSend Any Platform Content Link To Download👋"
     
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -37,123 +35,91 @@ async def download_media(url, filename):
             print(f"Download error: {e}")
     return False
 
-async def auto_delete_msg(context, chat_id, message_id):
-    await asyncio.sleep(1200) # 20 minutes
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except:
-        pass
-
 def cleanup_files(*filenames):
-    """Confirming Render deletes videos immediately after sending"""
     for filename in filenames:
         if filename and os.path.exists(filename):
-            try:
-                os.remove(filename)
-                print(f"Successfully deleted: {filename}")
-            except Exception as e:
-                print(f"Cleanup error: {e}")
+            try: os.remove(filename)
+            except: pass
 
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
-    if not any(domain in url for domain in TERABOX_DOMAINS):
-        return await update.message.reply_text("❌ Please send a valid Terabox link!")
-
-    # 1. INSTANT DELIVERY (Cached logic)
+    
+    # 1. Instant Cache Check
     if url in cache_memory:
         data = cache_memory[url]
-        keyboard = [[InlineKeyboardButton("Download More👋", callback_data="start_again")]]
-        caption = f"🎬 **{data['name']}**\n\n📦 **Size:** {data['size']}\n\n🕒 **Auto-deleting in 20 min.**"
+        keyboard = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
         
-        sent_msg = await update.message.reply_video(
-            video=data['file_id'],
-            thumbnail=data['thumb_id'],
-            duration=data['duration'],
-            caption=caption,
-            supports_streaming=True,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-        asyncio.create_task(auto_delete_msg(context, update.effective_chat.id, sent_msg.message_id))
+        if data['type'] == 'video':
+            await update.message.reply_video(video=data['file_id'], caption=data['caption'], reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            await update.message.reply_photo(photo=data['file_id'], caption=data['caption'], reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    # 2. STANDARD UPLOAD LOGIC
-    status_msg = await update.message.reply_text("🔎 **Fetching details...**", parse_mode="Markdown")
-    api_url = "https://xapiverse.com/api/terabox-pro"
-    headers = {"Content-Type": "application/json", "xAPIverse-Key": API_KEY}
+    status_msg = await update.message.reply_text("🔎 **Processing Link...**", parse_mode="Markdown")
 
+    # 2. RapidAPI Integration
+    api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autodownload"
+    headers = {
+        "x-rapidapi-key": RAPID_API_KEY,
+        "x-rapidapi-host": "social-download-all-in-one.p.rapidapi.com",
+        "Content-Type": "application/json"
+    }
+    
     try:
-        response = requests.post(api_url, json={"url": url}, headers=headers, timeout=60)
-        data = response.json()
+        response = requests.post(api_url, json={"url": url}, headers=headers, timeout=30)
+        res_data = response.json()
+        
+        # Adjusting to the common response structure of All-In-One APIs
+        media_url = res_data.get('url') or res_data.get('links', [{}])[0].get('url')
+        title = res_data.get('title', 'Social Media Content')
+        
+        if not media_url:
+            return await status_msg.edit_text("❌ Unsupported link or private content.")
 
-        if data.get("status") == "success" and data.get("list"):
-            info = data["list"][0]
-            dl_link = info.get("download_link")
-            thumb_url = info.get("thumbnail")
-            duration_str = info.get("duration", "00:00")
-            filename = info.get("name", "video.mp4")
-            size_fmt = info.get("size_formatted", "Unknown")
+        await status_msg.edit_text("📥 **Streaming to Telegram...**")
+        
+        filename = f"dl_{update.effective_user.id}.mp4"
+        success = await download_media(media_url, filename)
 
-            dur_seconds = sum(int(x) * 60**i for i, x in enumerate(reversed(duration_str.split(":"))))
-            thumb_name = f"thumb_{update.effective_user.id}.jpg"
-
-            await status_msg.edit_text("📥 **Downloading...**")
-            video_success = await download_media(dl_link, filename)
-            thumb_success = await download_media(thumb_url, thumb_name) if thumb_url else False
+        if success:
+            keyboard = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
+            caption = f"🎬 **{title[:50]}**\n\n🕒 **Auto-deleting in 20 min.**"
             
-            if video_success:
-                await status_msg.edit_text("📤 **Uploading...**")
+            with open(filename, 'rb') as f:
+                # Send to archive for caching
+                log_msg = await context.bot.send_video(chat_id=CHANNEL_ID, video=f, supports_streaming=True)
                 
-                with open(filename, 'rb') as video_file:
-                    thumb_file = open(thumb_name, 'rb') if thumb_success else None
-                    
-                    # Log to channel for File ID generation
-                    log_msg = await context.bot.send_video(
-                        chat_id=CHANNEL_ID,
-                        video=video_file,
-                        thumbnail=thumb_file,
-                        duration=dur_seconds,
-                        supports_streaming=True
-                    )
-                    
-                    # Update Cache
-                    cache_memory[url] = {
-                        'file_id': log_msg.video.file_id,
-                        'thumb_id': log_msg.video.thumbnail.file_id if thumb_success else None,
-                        'duration': dur_seconds,
-                        'name': filename,
-                        'size': size_fmt
-                    }
-
-                    # Reset file pointers
-                    video_file.seek(0)
-                    if thumb_file: thumb_file.seek(0)
-                    
-                    # Send to User with Clean Caption & Button
-                    caption = f"🎬 **{filename}**\n\n📦 **Size:** {size_fmt}\n\n🕒 **Auto-deleting in 20 min.**"
-                    sent_msg = await update.message.reply_video(
-                        video=video_file,
-                        caption=caption,
-                        thumbnail=thumb_file,
-                        duration=dur_seconds,
-                        supports_streaming=True,
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Download More👋", callback_data="start_again")]]),
-                        parse_mode="Markdown"
-                    )
-                    if thumb_file: thumb_file.close()
-
-                # IMMEDIATE CLEANUP FROM RENDER DISK
-                cleanup_files(filename, thumb_name)
+                # Cache the File ID
+                cache_memory[url] = {
+                    'file_id': log_msg.video.file_id,
+                    'type': 'video',
+                    'name': title,
+                    'caption': caption
+                }
                 
-                await status_msg.delete()
-                asyncio.create_task(auto_delete_msg(context, update.effective_chat.id, sent_msg.message_id))
-            else:
-                await status_msg.edit_text("❌ Download failed.")
+                f.seek(0)
+                sent_msg = await update.message.reply_video(
+                    video=f,
+                    caption=caption,
+                    supports_streaming=True,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode="Markdown"
+                )
+
+            cleanup_files(filename)
+            await status_msg.delete()
+            # Auto-delete from chat
+            asyncio.create_task(delete_after(context, update.effective_chat.id, sent_msg.message_id))
         else:
-            await status_msg.edit_text("❌ API Error: File not found.")
-            
+            await status_msg.edit_text("❌ Download failed.")
+
     except Exception as e:
-        await status_msg.edit_text(f"❌ **Error:** `{str(e)}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ Error: `{str(e)}`", parse_mode="Markdown")
+
+async def delete_after(context, chat_id, msg_id):
+    await asyncio.sleep(1200)
+    try: await context.bot.delete_message(chat_id, msg_id)
+    except: pass
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -171,4 +137,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
