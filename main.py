@@ -11,17 +11,14 @@ TOKEN = os.getenv("BOT_TOKEN")
 RAPID_API_KEY = os.getenv("RAPID_API_KEY")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# RAM Cache for <1s delivery on repeated links
+# RAM Cache for <1s delivery
 cache_memory = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Clean welcome message - no buttons attached
     text = "✨ **Social Media Downloader** ✨\n\nSend Any Platform Content Link To Download👋"
-    
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown")
     elif update.callback_query:
-        # Triggered by "Download More" - sends fresh start message
         await update.callback_query.message.reply_text(text, parse_mode="Markdown")
 
 async def download_file(url, filename):
@@ -39,20 +36,16 @@ async def download_file(url, filename):
 async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text
     
-    # 1. INSTANT CACHE CHECK (<1s Speed)
+    # 1. Instant Cache Check
     if url in cache_memory:
         data = cache_memory[url]
-        keyboard = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
-        
-        if data['type'] == 'video':
-            await update.message.reply_video(video=data['id'], caption=data['cap'], reply_markup=InlineKeyboardMarkup(keyboard), supports_streaming=True)
-        else:
-            await update.message.reply_photo(photo=data['id'], caption=data['cap'], reply_markup=InlineKeyboardMarkup(keyboard))
+        kb = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
+        await update.message.reply_video(video=data['id'], caption=data['cap'], reply_markup=InlineKeyboardMarkup(kb), supports_streaming=True)
         return
 
     status = await update.message.reply_text("🔎 **Processing Link...**")
 
-    # 2. RapidAPI Fetch
+    # 2. RapidAPI Fetch (Using the 'autodownload' endpoint)
     api_url = "https://social-download-all-in-one.p.rapidapi.com/v1/social/autodownload"
     headers = {
         "x-rapidapi-key": RAPID_API_KEY,
@@ -60,52 +53,51 @@ async def handle_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     
     try:
-        res = requests.post(api_url, json={"url": url}, headers=headers, timeout=30).json()
+        response = requests.post(api_url, json={"url": url}, headers=headers, timeout=30)
+        res = response.json()
         
-        # Extract media (Handles different API response styles)
-        media_url = res.get('url') or (res.get('medias', [{}])[0].get('url') if res.get('medias') else None)
-        title = res.get('title', 'Social Content')
-        is_video = ".mp4" in str(media_url).lower() or res.get('type') == 'video'
+        # Smart detection of media URL
+        media_url = None
+        # Check standard paths
+        if res.get('url'): media_url = res['url']
+        elif res.get('medias'): media_url = res['medias'][0].get('url')
+        elif res.get('links'): media_url = res['links'][0].get('url')
 
         if not media_url:
-            return await status.edit_text("❌ Unsupported link or private content.")
+            return await status.edit_text("❌ **Link Not Supported.**\nMake sure the video is public.")
 
         await status.edit_text("📥 **Streaming to Telegram...**")
-        filename = f"file_{update.effective_user.id}.mp4" if is_video else f"img_{update.effective_user.id}.jpg"
+        filename = f"vid_{update.effective_user.id}.mp4"
         
         if await download_file(media_url, filename):
-            caption = f"🎬 **{title[:60]}**\n\n🕒 **Auto-deleting in 20 min.**"
+            title = res.get('title', 'Social Video')
+            caption = f"🎬 **{title[:50]}**\n\n🕒 **Auto-deleting in 20 min.**"
             kb = [[InlineKeyboardButton("Download More🫥", callback_data="start_again")]]
             
             with open(filename, 'rb') as f:
-                # Store in Archive for File IDs
-                if is_video:
-                    log = await context.bot.send_video(chat_id=CHANNEL_ID, video=f)
-                    file_id = log.video.file_id
-                else:
-                    log = await context.bot.send_photo(chat_id=CHANNEL_ID, photo=f)
-                    file_id = log.photo[-1].file_id
+                # Store in Archive for File ID
+                log = await context.bot.send_video(chat_id=CHANNEL_ID, video=f)
+                file_id = log.video.file_id
 
                 # Cache it
-                cache_memory[url] = {'id': file_id, 'type': 'video' if is_video else 'photo', 'cap': caption}
+                cache_memory[url] = {'id': file_id, 'cap': caption}
                 
                 # Send to user
                 f.seek(0)
-                if is_video:
-                    sent = await update.message.reply_video(video=f, caption=caption, reply_markup=InlineKeyboardMarkup(kb), supports_streaming=True)
-                else:
-                    sent = await update.message.reply_photo(photo=f, caption=caption, reply_markup=InlineKeyboardMarkup(kb))
+                sent = await update.message.reply_video(
+                    video=f, 
+                    caption=caption, 
+                    reply_markup=InlineKeyboardMarkup(kb), 
+                    supports_streaming=True
+                )
 
-            # Render Cleanup
             if os.path.exists(filename): os.remove(filename)
             await status.delete()
-            
-            # Auto-delete from user chat
             asyncio.create_task(delete_msg(context, update.effective_chat.id, sent.message_id))
         else:
             await status.edit_text("❌ Download failed.")
     except Exception as e:
-        await status.edit_text(f"❌ Error: `{str(e)}`")
+        await status.edit_text(f"❌ API Error. Check if your API Key is valid.")
 
 async def delete_msg(context, chat_id, msg_id):
     await asyncio.sleep(1200)
@@ -116,7 +108,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     if query.data == "start_again":
-        await start(update, context) # Hiddenly triggers start
+        await start(update, context)
 
 def main():
     keep_alive()
